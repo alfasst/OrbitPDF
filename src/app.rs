@@ -1,16 +1,14 @@
-// SPDX-License-Identifier: {{ license }}
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::config::Config;
 use crate::fl;
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::{Alignment, Length, Subscription};
-use cosmic::widget::{self, about::About, icon, menu, nav_bar};
-use cosmic::{iced_futures, prelude::*};
-use futures_util::SinkExt;
+use cosmic::iced::{Length, Subscription};
+use cosmic::widget::{self, about::About, menu};
+use cosmic::{prelude::*};
 use std::collections::HashMap;
-use std::time::Duration;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
@@ -24,16 +22,12 @@ pub struct AppModel {
     context_page: ContextPage,
     /// The about page for this app.
     about: About,
-    /// Contains items assigned to the nav bar panel.
-    nav: nav_bar::Model,
     /// Key bindings for the application's menu bar.
     key_binds: HashMap<menu::KeyBind, MenuAction>,
     /// Configuration data that persists between application runs.
     config: Config,
-    /// Time active
-    time: u32,
-    /// Toggle the watch subscription
-    watch_is_active: bool,
+    /// The currently opened PDF file path.
+    opened_file: Option<std::path::PathBuf>,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -41,9 +35,9 @@ pub struct AppModel {
 pub enum Message {
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
-    ToggleWatch,
     UpdateConfig(Config),
-    WatchTick(u32),
+    OpenFile,
+    FileOpened(Option<std::path::PathBuf>),
 }
 
 /// Create a COSMIC application from the app model
@@ -58,7 +52,7 @@ impl cosmic::Application for AppModel {
     type Message = Message;
 
     /// Unique identifier in RDNN (reverse domain name notation) format.
-    const APP_ID: &'static str = "dev.mmurphy.Test";
+    const APP_ID: &'static str = "com.github.alfasst.OrbitPDF";
 
     fn core(&self) -> &cosmic::Core {
         &self.core
@@ -73,24 +67,6 @@ impl cosmic::Application for AppModel {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        // Create a nav bar with three page items.
-        let mut nav = nav_bar::Model::default();
-
-        nav.insert()
-            .text(fl!("page-id", num = 1))
-            .data::<Page>(Page::Page1)
-            .icon(icon::from_name("applications-science-symbolic"))
-            .activate();
-
-        nav.insert()
-            .text(fl!("page-id", num = 2))
-            .data::<Page>(Page::Page2)
-            .icon(icon::from_name("applications-system-symbolic"));
-
-        nav.insert()
-            .text(fl!("page-id", num = 3))
-            .data::<Page>(Page::Page3)
-            .icon(icon::from_name("applications-games-symbolic"));
 
         // Create the about widget
         let about = About::default()
@@ -105,7 +81,6 @@ impl cosmic::Application for AppModel {
             core,
             context_page: ContextPage::default(),
             about,
-            nav,
             key_binds: HashMap::new(),
             // Optional configuration file for an application.
             config: cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
@@ -120,8 +95,7 @@ impl cosmic::Application for AppModel {
                     }
                 })
                 .unwrap_or_default(),
-            time: 0,
-            watch_is_active: false,
+            opened_file: None,
         };
 
         // Create a startup command that sets the window title.
@@ -143,9 +117,9 @@ impl cosmic::Application for AppModel {
         vec![menu_bar.into()]
     }
 
-    /// Enables the COSMIC application to create a nav bar with this model.
-    fn nav_model(&self) -> Option<&nav_bar::Model> {
-        Some(&self.nav)
+    fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
+        let open_btn = widget::button::text("Open PDF").on_press(Message::OpenFile);
+        vec![open_btn.into()]
     }
 
     /// Display a context drawer if the context page is requested.
@@ -168,69 +142,17 @@ impl cosmic::Application for AppModel {
     /// Application events will be processed through the view. Any messages emitted by
     /// events received by widgets will be passed to the update method.
     fn view(&self) -> Element<'_, Self::Message> {
-        let space_s = cosmic::theme::spacing().space_s;
-        let content: Element<_> = match self.nav.active_data::<Page>().unwrap() {
-            Page::Page1 => {
-                let header = widget::row::with_capacity(2)
-                    .push(widget::text::title1(fl!("welcome")))
-                    .push(widget::text::title3(fl!("page-id", num = 1)))
-                    .align_y(Alignment::End)
-                    .spacing(space_s);
-
-                let counter_label = ["Watch: ", self.time.to_string().as_str()].concat();
-                let section = cosmic::widget::settings::section().add(
-                    cosmic::widget::settings::item::builder(counter_label).control(
-                        widget::button::text(if self.watch_is_active {
-                            "Stop"
-                        } else {
-                            "Start"
-                        })
-                        .on_press(Message::ToggleWatch),
-                    ),
-                );
-
-                widget::column::with_capacity(2)
-                    .push(header)
-                    .push(section)
-                    .spacing(space_s)
-                    .height(Length::Fill)
-                    .into()
-            }
-
-            Page::Page2 => {
-                let header = widget::row::with_capacity(2)
-                    .push(widget::text::title1(fl!("welcome")))
-                    .push(widget::text::title3(fl!("page-id", num = 2)))
-                    .align_y(Alignment::End)
-                    .spacing(space_s);
-
-                widget::column::with_capacity(1)
-                    .push(header)
-                    .spacing(space_s)
-                    .height(Length::Fill)
-                    .into()
-            }
-
-            Page::Page3 => {
-                let header = widget::row::with_capacity(2)
-                    .push(widget::text::title1(fl!("welcome")))
-                    .push(widget::text::title3(fl!("page-id", num = 3)))
-                    .align_y(Alignment::End)
-                    .spacing(space_s);
-
-                widget::column::with_capacity(1)
-                    .push(header)
-                    .spacing(space_s)
-                    .height(Length::Fill)
-                    .into()
-            }
+        let content: Element<_> = if let Some(path) = &self.opened_file {
+            widget::text::title3(path.to_string_lossy().into_owned())
+                .into()
+        } else {
+            widget::text::title1("No PDF Opened")
+                .into()
         };
 
         widget::container(content)
-            .width(600)
-            .height(Length::Fill)
-            .apply(widget::container)
             .width(Length::Fill)
+            .height(Length::Fill)
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
             .into()
@@ -243,37 +165,9 @@ impl cosmic::Application for AppModel {
     /// stopped and started conditionally based on application state, or persist
     /// indefinitely.
     fn subscription(&self) -> Subscription<Self::Message> {
-        // Add subscriptions which are always active.
-        let mut subscriptions = vec![
-            // Watch for application configuration changes.
-            self.core()
-                .watch_config::<Config>(Self::APP_ID)
-                .map(|update| {
-                    // for why in update.errors {
-                    //     tracing::error!(?why, "app config error");
-                    // }
-
-                    Message::UpdateConfig(update.config)
-                }),
-        ];
-
-        // Conditionally enables a timer that emits a message every second.
-        if self.watch_is_active {
-            subscriptions.push(Subscription::run(|| {
-                iced_futures::stream::channel(1, |mut emitter| async move {
-                    let mut time = 1;
-                    let mut interval = tokio::time::interval(Duration::from_secs(1));
-
-                    loop {
-                        interval.tick().await;
-                        _ = emitter.send(Message::WatchTick(time)).await;
-                        time += 1;
-                    }
-                })
-            }));
-        }
-
-        Subscription::batch(subscriptions)
+        self.core()
+            .watch_config::<Config>(Self::APP_ID)
+            .map(|update| Message::UpdateConfig(update.config))
     }
 
     /// Handles messages emitted by the application and its widgets.
@@ -282,12 +176,26 @@ impl cosmic::Application for AppModel {
     /// on the application's async runtime.
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
-            Message::WatchTick(time) => {
-                self.time = time;
+            Message::OpenFile => {
+                let task = tokio::task::spawn_blocking(|| {
+                    rfd::FileDialog::new()
+                        .set_title("Open PDF")
+                        .add_filter("PDF files", &["pdf"])
+                        .pick_file()
+                });
+                
+                return Task::perform(
+                    async { task.await.unwrap_or(None) },
+                    Message::FileOpened,
+                )
+                .map(Into::into)
             }
-
-            Message::ToggleWatch => {
-                self.watch_is_active = !self.watch_is_active;
+            
+            Message::FileOpened(path) => {
+                if let Some(p) = path {
+                    self.opened_file = Some(p);
+                    return self.update_title();
+                }
             }
 
             Message::ToggleContextPage(context_page) => {
@@ -315,13 +223,6 @@ impl cosmic::Application for AppModel {
         Task::none()
     }
 
-    /// Called when a nav item is selected.
-    fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Self::Message>> {
-        // Activate the page in the model.
-        self.nav.activate(id);
-
-        self.update_title()
-    }
 }
 
 impl AppModel {
@@ -329,9 +230,11 @@ impl AppModel {
     pub fn update_title(&mut self) -> Task<cosmic::Action<Message>> {
         let mut window_title = fl!("app-title");
 
-        if let Some(page) = self.nav.text(self.nav.active()) {
+        if let Some(path) = &self.opened_file {
             window_title.push_str(" — ");
-            window_title.push_str(page);
+            if let Some(name) = path.file_name() {
+                window_title.push_str(&name.to_string_lossy());
+            }
         }
 
         if let Some(id) = self.core.main_window_id() {
@@ -340,13 +243,6 @@ impl AppModel {
             Task::none()
         }
     }
-}
-
-/// The page to display in the application.
-pub enum Page {
-    Page1,
-    Page2,
-    Page3,
 }
 
 /// The context page to display in the context drawer.

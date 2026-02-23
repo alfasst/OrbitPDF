@@ -1,7 +1,7 @@
 # Name of the application's binary.
-name := '{{ project-name }}'
+name := 'orbit-pdf'
 # The unique ID of the application.
-appid := '{{ appid }}'
+appid := 'com.github.alfasst.OrbitPDF'
 {% raw %}
 # Path to root file system, which defaults to `/`.
 rootdir := ''

@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name={{ project-name | title_case }}
-Comment={{ description }}
+Name=OrbitPDF
+Comment=A PDF viewer for Pop!_OS COSMIC DE
 Type=Application
-Icon={{ appid }}
-Exec={{ project-name }} %F
+Icon=com.github.alfasst.OrbitPDF
+Exec=orbit-pdf %F
 Terminal=false
 StartupNotify=true
 Categories=COSMIC

@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>{{ appid }}</id>
+  <id>com.github.alfasst.OrbitPDF</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>{{ license }}</project_license>
-  <name>{{ project-name | title_case }}</name>
-  <summary>{{ description }}</summary>
+  <project_license>GPL-3.0-only</project_license>
+  <name>OrbitPDF</name>
+  <summary>A PDF viewer for Pop!_OS COSMIC DE</summary>
   <icon type="remote" width="64" height="64" scale="1">
-    {{ repository-url }}/raw/main/resources/icons/hicolor/scalable/apps/icon.svg
+    https://github.com/alfasst/OrbitPDF/raw/main/resources/icons/hicolor/scalable/apps/icon.svg
   </icon>
-  <url type="vcs-browser">{{ repository-url }}</url>
-  <launchable type="desktop-id">{{ appid }}.desktop</launchable>
+  <url type="vcs-browser">https://github.com/alfasst/OrbitPDF</url>
+  <launchable type="desktop-id">com.github.alfasst.OrbitPDF.desktop</launchable>
   <provides>
-    <id>{{ appid }}</id>
+    <id>com.github.alfasst.OrbitPDF</id>
     <binaries>
-      <binary>{{ project-name }}</binary>
+      <binary>orbit-pdf</binary>
     </binaries>
   </provides>
   <requires>
