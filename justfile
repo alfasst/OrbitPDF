@@ -2,7 +2,6 @@
 name := 'orbit-pdf'
 # The unique ID of the application.
 appid := 'com.github.alfasst.OrbitPDF'
-{% raw %}
 # Path to root file system, which defaults to `/`.
 rootdir := ''
 # The prefix for the `/usr` directory.
@@ -93,4 +92,3 @@ tag version:
     git commit -m 'release: {{version}}'
     git commit --amend
     git tag -a {{version}} -m ''
-{% endraw %}

@@ -7,8 +7,10 @@ use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget::{self, about::About, menu};
-use cosmic::{prelude::*};
+use cosmic::prelude::*;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use pdfium_render::prelude::*;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
@@ -26,8 +28,27 @@ pub struct AppModel {
     key_binds: HashMap<menu::KeyBind, MenuAction>,
     /// Configuration data that persists between application runs.
     config: Config,
-    /// The currently opened PDF file path.
-    opened_file: Option<std::path::PathBuf>,
+    
+    /// Global Pdfium bindings instance.
+    pdfium: &'static Pdfium,
+
+    /// The currently active PDF state.
+    pdf_state: PdfState,
+}
+
+pub enum PdfState {
+    None,
+    Loading,
+    Loaded {
+        path: PathBuf,
+        doc: PdfDocument<'static>,
+        current_page_image: Option<cosmic::widget::image::Handle>,
+        current_page_index: u16,
+        page_count: u16,
+        zoom_level: f32,
+        search_query: String,
+    },
+    Error(String),
 }
 
 /// Messages emitted by the application and its widgets.
@@ -37,7 +58,13 @@ pub enum Message {
     ToggleContextPage(ContextPage),
     UpdateConfig(Config),
     OpenFile,
-    FileOpened(Option<std::path::PathBuf>),
+    FileOpened(Option<PathBuf>),
+    NextPage,
+    PreviousPage,
+    ZoomIn,
+    ZoomOut,
+    UpdateSearchQuery(String),
+    SubmitSearch(String),
 }
 
 /// Create a COSMIC application from the app model
@@ -76,26 +103,26 @@ impl cosmic::Application for AppModel {
             .links([(fl!("repository"), REPOSITORY)])
             .license(env!("CARGO_PKG_LICENSE"));
 
+        let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+        let exe_dir = exe_path.parent().unwrap_or(&exe_path);
+        let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(exe_dir))
+            .unwrap_or_else(|_| Pdfium::bind_to_system_library().expect("Could not bind to Pdfium"));
+        let pdfium: &'static Pdfium = Box::leak(Box::new(Pdfium::new(bindings)));
+
         // Construct the app model with the runtime's core.
         let mut app = AppModel {
             core,
             context_page: ContextPage::default(),
             about,
             key_binds: HashMap::new(),
-            // Optional configuration file for an application.
             config: cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
                 .map(|context| match Config::get_entry(&context) {
                     Ok(config) => config,
-                    Err((_errors, config)) => {
-                        // for why in errors {
-                        //     tracing::error!(%why, "error loading app config");
-                        // }
-
-                        config
-                    }
+                    Err((_errors, config)) => config,
                 })
                 .unwrap_or_default(),
-            opened_file: None,
+            pdfium,
+            pdf_state: PdfState::None,
         };
 
         // Create a startup command that sets the window title.
@@ -118,8 +145,50 @@ impl cosmic::Application for AppModel {
     }
 
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
+        let mut controls = Vec::new();
+
+        if let PdfState::Loaded { current_page_index, page_count, search_query, .. } = &self.pdf_state {
+            let search_input = widget::text_input("Search text...", search_query)
+                .on_input(Message::UpdateSearchQuery)
+                .on_submit(Message::SubmitSearch)
+                .width(Length::Fixed(200.0));
+            controls.push(search_input.into());
+
+            let zoom_out_btn = widget::button::icon(widget::icon::from_name("zoom-out-symbolic"))
+                .on_press(Message::ZoomOut);
+            let zoom_in_btn = widget::button::icon(widget::icon::from_name("zoom-in-symbolic"))
+                .on_press(Message::ZoomIn);
+
+            let prev_btn = if *current_page_index > 0 {
+                widget::button::icon(widget::icon::from_name("go-previous-symbolic")).on_press(Message::PreviousPage)
+            } else {
+                widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
+            };
+
+            let next_btn = if *current_page_index < *page_count - 1 {
+                widget::button::icon(widget::icon::from_name("go-next-symbolic")).on_press(Message::NextPage)
+            } else {
+                widget::button::icon(widget::icon::from_name("go-next-symbolic"))
+            };
+
+            let page_text = widget::text::text(format!("Page {} of {}", current_page_index + 1, page_count));
+
+            let navigation_row = widget::row()
+                .push(zoom_out_btn)
+                .push(zoom_in_btn)
+                .push(prev_btn)
+                .push(page_text)
+                .push(next_btn)
+                .spacing(8)
+                .align_y(Vertical::Center);
+
+            controls.push(navigation_row.into());
+        }
+
         let open_btn = widget::button::text("Open PDF").on_press(Message::OpenFile);
-        vec![open_btn.into()]
+        controls.push(open_btn.into());
+
+        controls
     }
 
     /// Display a context drawer if the context page is requested.
@@ -142,12 +211,37 @@ impl cosmic::Application for AppModel {
     /// Application events will be processed through the view. Any messages emitted by
     /// events received by widgets will be passed to the update method.
     fn view(&self) -> Element<'_, Self::Message> {
-        let content: Element<_> = if let Some(path) = &self.opened_file {
-            widget::text::title3(path.to_string_lossy().into_owned())
-                .into()
-        } else {
-            widget::text::title1("No PDF Opened")
-                .into()
+        let content: Element<_> = match &self.pdf_state {
+            PdfState::None => {
+                widget::text::title1("No PDF Opened")
+                    .into()
+            }
+            PdfState::Loading => {
+                widget::text::title1("Loading PDF...")
+                    .into()
+            }
+            PdfState::Error(err) => {
+                widget::text::title3(format!("Error: {}", err))
+                    .into()
+            }
+            PdfState::Loaded { path, current_page_image, .. } => {
+                let mut col = widget::column()
+                    .push(widget::text::title3(format!("Loaded: {}", path.to_string_lossy())))
+                    .spacing(16)
+                    .align_x(Horizontal::Center);
+                
+                if let Some(handle) = current_page_image {
+                    col = col.push(
+                        widget::container(
+                            widget::image(handle.clone())
+                                .width(Length::Fill)
+                        )
+                        .padding(16)
+                    );
+                }
+                
+                widget::scrollable(col).into()
+            }
         };
 
         widget::container(content)
@@ -191,10 +285,89 @@ impl cosmic::Application for AppModel {
                 .map(Into::into)
             }
             
-            Message::FileOpened(path) => {
-                if let Some(p) = path {
-                    self.opened_file = Some(p);
+            Message::FileOpened(path_opt) => {
+                if let Some(path) = path_opt {
+                    match self.pdfium.load_pdf_from_file(&path, None) {
+                        Ok(doc) => {
+                            let page_count = doc.pages().len();
+                            let current_page_index = 0;
+                            let zoom_level = 2.0;
+
+                            let current_page_image = Self::render_page(&doc, current_page_index, zoom_level);
+
+                            self.pdf_state = PdfState::Loaded { 
+                                path, doc, current_page_image, current_page_index, page_count, zoom_level, search_query: String::new()
+                            };
+                        }
+                        Err(e) => {
+                            self.pdf_state = PdfState::Error(format!("Failed to load PDF: {}", e));
+                        }
+                    }
                     return self.update_title();
+                }
+            }
+
+            Message::NextPage => {
+                if let PdfState::Loaded { ref doc, ref mut current_page_index, ref mut current_page_image, page_count, zoom_level, .. } = self.pdf_state {
+                    if *current_page_index < page_count - 1 {
+                        *current_page_index += 1;
+                        *current_page_image = Self::render_page(doc, *current_page_index, zoom_level);
+                    }
+                }
+            }
+            Message::PreviousPage => {
+                if let PdfState::Loaded { ref doc, ref mut current_page_index, ref mut current_page_image, zoom_level, .. } = self.pdf_state {
+                    if *current_page_index > 0 {
+                        *current_page_index -= 1;
+                        *current_page_image = Self::render_page(doc, *current_page_index, zoom_level);
+                    }
+                }
+            }
+            Message::ZoomIn => {
+                if let PdfState::Loaded { ref doc, current_page_index, ref mut current_page_image, ref mut zoom_level, .. } = self.pdf_state {
+                    *zoom_level += 0.2;
+                    if *zoom_level > 5.0 { *zoom_level = 5.0; }
+                    *current_page_image = Self::render_page(doc, current_page_index, *zoom_level);
+                }
+            }
+            Message::ZoomOut => {
+                if let PdfState::Loaded { ref doc, current_page_index, ref mut current_page_image, ref mut zoom_level, .. } = self.pdf_state {
+                    *zoom_level -= 0.2;
+                    if *zoom_level < 0.2 { *zoom_level = 0.2; }
+                    *current_page_image = Self::render_page(doc, current_page_index, *zoom_level);
+                }
+            }
+
+            Message::UpdateSearchQuery(query) => {
+                if let PdfState::Loaded { ref mut search_query, .. } = self.pdf_state {
+                    *search_query = query;
+                }
+            }
+
+            Message::SubmitSearch(_) => {
+                if let PdfState::Loaded { ref doc, ref mut current_page_index, ref mut current_page_image, page_count, ref zoom_level, ref search_query, .. } = self.pdf_state {
+                    if !search_query.is_empty() {
+                        let query_lower = search_query.to_lowercase();
+                        // Search pages starting from current + 1, wrapping around
+                        let mut found = false;
+                        for i in 0..page_count {
+                            let check_index = (*current_page_index + 1 + i) % page_count;
+                            if let Ok(page) = doc.pages().get(check_index) {
+                                if let Ok(text) = page.text() {
+                                    let page_str = text.all().to_lowercase();
+                                    if page_str.contains(&query_lower) {
+                                        *current_page_index = check_index;
+                                        *current_page_image = Self::render_page(doc, *current_page_index, *zoom_level);
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !found {
+                            println!("cargo:warning=Search matched nothing");
+                        }
+                    }
                 }
             }
 
@@ -230,7 +403,7 @@ impl AppModel {
     pub fn update_title(&mut self) -> Task<cosmic::Action<Message>> {
         let mut window_title = fl!("app-title");
 
-        if let Some(path) = &self.opened_file {
+        if let PdfState::Loaded { path, .. } = &self.pdf_state {
             window_title.push_str(" — ");
             if let Some(name) = path.file_name() {
                 window_title.push_str(&name.to_string_lossy());
@@ -242,6 +415,21 @@ impl AppModel {
         } else {
             Task::none()
         }
+    }
+
+    pub fn render_page(doc: &PdfDocument<'static>, index: u16, zoom: f32) -> Option<cosmic::widget::image::Handle> {
+        if let Ok(page) = doc.pages().get(index) {
+            let config = PdfRenderConfig::new()
+                .scale_page_by_factor(zoom)
+                .set_clear_color(PdfColor::WHITE);
+            if let Ok(bitmap) = page.render_with_config(&config) {
+                let img = bitmap.as_image(); // DynamicImage
+                let rgba = img.into_rgba8();
+                let (width, height) = rgba.dimensions();
+                return Some(cosmic::widget::image::Handle::from_rgba(width, height, rgba.into_raw()));
+            }
+        }
+        None
     }
 }
 
